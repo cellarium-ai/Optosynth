@@ -1,6 +1,6 @@
 Optosynth
 =========
-[logo]: https://github.com/broadinstitute/Optosynth/raw/master/docs/imgs/optosynth_demo.gif "Optosynth"
+![Optosynth](https://github.com/broadinstitute/Optosynth/raw/master/docs/imgs/optosynth_demo.gif)
 
 Optosynth is a python package for generating synthetic voltage imaging ("Optopatch") data using empirical morphological reconstructions and paired electrophysiology measurements from Allen Brain single-neuron database.
 
