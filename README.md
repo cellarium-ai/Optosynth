@@ -31,7 +31,7 @@ Requirements
 Optosynth requires the following python modules:
 
 - `allensdk`
-- `Pillow`
+- `Pillow>7.0.0` (having the right version is extremely important -- Optosynth produces bad data with older versions of `Pillow`)
 - `boltons`
 - `tqdm`
 - `torch`
