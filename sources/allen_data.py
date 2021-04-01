@@ -44,20 +44,24 @@ class ProcessedAllenNeuronMorphology:
         self.mask = mask
         self.soma_coords = soma_coords
         self.soma_radius = soma_radius
-
+        
     @staticmethod
     def from_morphology(
             cell_id: int,
             morph: Morphology,
             global_scale_factor: float = 10.,
             dendrite_scale_factor: float = 2.0,
-            soma_scale_factor: float = 1.0) -> 'ProcessedAllenNeuronMorphology':
+            soma_scale_factor: float = 1.0,
+            soma_relative_wiggle_size: float = 0.2,
+            soma_wiggle_n_components: int = 3) -> 'ProcessedAllenNeuronMorphology':
         
         mask_out = ProcessedAllenNeuronMorphology.generate_neuron_bitmask(
             morph,
             global_scale_factor,
             dendrite_scale_factor,
-            soma_scale_factor)
+            soma_scale_factor,
+            soma_relative_wiggle_size,
+            soma_wiggle_n_components)
         
         return ProcessedAllenNeuronMorphology(
             cell_id=cell_id,
@@ -73,7 +77,9 @@ class ProcessedAllenNeuronMorphology:
             morph: Morphology,
             global_scale_factor: float,
             dendrite_scale_factor: float,
-            soma_scale_factor: float):
+            soma_scale_factor: float,
+            soma_relative_wiggle_size: float,
+            soma_wiggle_n_components: int):
         min_x, min_y, max_x, max_y = get_bounding_box(morph)
         width = int(global_scale_factor * (max_x - min_x))
         height = int(global_scale_factor * (max_y - min_y))
@@ -88,6 +94,22 @@ class ProcessedAllenNeuronMorphology:
 
         def scale_rad(val1, val2):
             return int(max(1.0, 0.5 * global_scale_factor * dendrite_scale_factor * (val1 + val2)))
+        
+        def generate_polygon(x0, y0, radius, relative_wiggle_size, wiggle_n_components) -> List[Tuple]:
+            x0, y0, radius = float(x0), float(y0), float(radius)
+            phi_n_arr = 2 * np.pi * np.random.rand(wiggle_n_components)
+            a_n_arr = np.random.randn(wiggle_n_components)
+            a_n_arr[0] = 0.
+            scale_factor = np.reciprocal(1e-3 + np.sum(np.abs(a_n_arr))) * relative_wiggle_size * radius
+            a_n_arr = scale_factor * a_n_arr
+            t_arr = np.linspace(0, 2 * np.pi, num=360, endpoint=False)
+            n_arr = np.arange(0, wiggle_n_components)
+            radius_t = radius + np.sum(
+                a_n_arr[None, :] * np.cos(n_arr[None, :] * t_arr[:, None] + phi_n_arr[None, :]),
+                axis=-1)
+            x_t = np.abs(radius_t) * np.cos(t_arr) + x0
+            y_t = np.abs(radius_t) * np.sin(t_arr) + y0
+            return [(int(x), int(y)) for x, y in zip(x_t, y_t)]
 
         for n in morph.compartment_list_by_type(Morphology.DENDRITE):
             for c in morph.children_of(n):
@@ -99,10 +121,11 @@ class ProcessedAllenNeuronMorphology:
         for n in morph.compartment_list_by_type(Morphology.SOMA):
             soma_x0, soma_y0 = scale_x(n['x']), scale_y(n['y'])
             soma_rad = int(np.ceil(global_scale_factor * soma_scale_factor * n['radius']))
-            draw.ellipse([
-                (soma_x0 - soma_rad, soma_y0 - soma_rad),
-                (soma_x0 + soma_rad, soma_y0 + soma_rad)],
-                fill=1)
+            poly = generate_polygon(
+                soma_x0, soma_y0, soma_rad,
+                soma_relative_wiggle_size,
+                soma_wiggle_n_components)
+            draw.polygon(poly, fill=1)
 
         return {
             'mask': np.asarray(img.getdata()).reshape(height, width),
@@ -140,7 +163,7 @@ class ProcessedAllenNeuronMorphology:
             mask=mask,
             soma_coords=soma_coords,
             soma_radius=soma_radius)
-    
+
 
 class ProcessedAllenNeuronElectrophysiology:
     def __init__(

@@ -19,7 +19,7 @@ class SyntheticNeuronSpecs(NamedTuple):
     min_reporter_density: float  # pixel^-2
     max_reporter_density: float  # pixel^-2
     reporter_density_var_lengthscale: float  # pixel
-    n_integ_points: int  # number of points to use for integrating fluorescence
+    ephys_lowpass_freq: float  # ephys lowpass frequency 
 
 
 class VoltageToFluorescenceSpecs(NamedTuple):

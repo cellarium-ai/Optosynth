@@ -2,9 +2,15 @@ import os
 import numpy as np
 import pandas as pd
 import torch
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import logging
 from tqdm.auto import tqdm
+
+import matplotlib.pyplot as plt
+from matplotlib.colors import Normalize
+import skvideo
+from skvideo import io as skio
+from PIL import Image, ImageOps, ImageDraw
 
 from allen_data import \
     ProcessedAllenNeuronMorphology, \
@@ -30,7 +36,7 @@ class Optosynth:
             neuron_specs: SyntheticNeuronSpecs,
             bg_specs: BackgroundFluorescenceSpecs,
             v2f_specs: VoltageToFluorescenceSpecs,
-            cam_specs: CameraSpecs,
+            cam_specs: Optional[CameraSpecs],
             ephys_summary_df: pd.DataFrame,
             optosynth_data_path: str,
             device: torch.device,
@@ -91,7 +97,10 @@ class Optosynth:
             dtype=dtype)
 
         self.log_info('Instantiating the camera ...')
-        self.camera = CameraSimulator(cam_specs)
+        if cam_specs is not None:
+            self.camera = CameraSimulator(cam_specs)
+        else:
+            self.camera = None
         
         self.log_info('Generating ground truth masks ...')
         self.masks_nyx = np.zeros(
@@ -108,18 +117,29 @@ class Optosynth:
                 target_anchor_y=self.ys_n[i_neuron])
             self.masks_nyx[i_neuron, ...] = mask_yx
 
+        self.bg_tyx_list = None
+        self.neuron_fluorescence_tyx_list = None
+        self.neuron_mean_fluorescence_nt_list = None
+        self.clean_movie_tyx_list = None
+        self.noisy_movie_tyx_list = None
+
+    def generate_fluorescence_data(self):
+        
         self.bg_tyx_list = []
         self.neuron_fluorescence_tyx_list = []
         self.neuron_mean_fluorescence_nt_list = []
-        self.clean_movie_tyx_list = []
-        self.noisy_movie_tyx_list = []
-        
+
         for i_segment in range(self.n_segments):
             self.log_info(f'Generating synthetic data for segment {i_segment + 1} / {self.n_segments} ...')
             segment_data = self._generate_segment_data(i_segment)
             self.bg_tyx_list.append(segment_data['bg_tyx'])
             self.neuron_fluorescence_tyx_list.append(segment_data['neuron_fluorescence_tyx'])
             self.neuron_mean_fluorescence_nt_list.append(segment_data['neuron_mean_fluorescence_nt'])
+    
+    def generate_camera_data(self):
+        
+        self.clean_movie_tyx_list = []
+        self.noisy_movie_tyx_list = []
             
         for i_segment in range(self.n_segments):
             self.log_info(f'Generating clean and noisy camera readout for segment {i_segment + 1} / {self.n_segments} ...')
@@ -127,6 +147,9 @@ class Optosynth:
             self.clean_movie_tyx_list.append(camera_data['clean_movie_tyx'])
             self.noisy_movie_tyx_list.append(camera_data['noisy_movie_tyx'])
 
+    def reset_camera(self, cam_specs: CameraSpecs):
+        self.camera = CameraSimulator(cam_specs)
+        
     def log_info(self, msg: str):
         print(msg)
     
@@ -181,8 +204,7 @@ class Optosynth:
                 neuron = neurons[i_neuron]
                 fluorescence_yx = neuron.get_fluorescence(
                     sweep_index=sweep_indices[i_neuron],
-                    t=time[i_t],
-                    sampling_rate=opto_specs.sampling_rate)
+                    t=time[i_t])
                 neuron_mean_fluorescence_nt[i_neuron, i_t] = np.mean(fluorescence_yx[neuron.mask])
                 paste_image(
                     source_yx=fluorescence_yx,
@@ -245,10 +267,51 @@ class Optosynth:
             'noisy_movie_tyx': noisy_movie_tyx,
         }
     
+    def get_combined_mask(self, alpha: int = 50, show_soma: bool = True) -> Image:
+        
+        prop_cycle = plt.rcParams['axes.prop_cycle']
+        colors = prop_cycle.by_key()['color']
+        combined_masks = Image.new('RGBA', size=(self.opto_specs.width, self.opto_specs.height))
+
+        for i_neuron in range(self.opto_specs.n_neurons):
+            c_mask = Image.fromarray(self.masks_nyx[i_neuron, ...])
+            c_mask = ImageOps.colorize(
+                c_mask.convert('L'),
+                black='black',
+                white=colors[i_neuron % len(colors)])
+            c_mask = c_mask.convert('RGBA')
+            c_pixels = c_mask.load()
+            for x in range(self.opto_specs.width):
+                for y in range(self.opto_specs.height):
+                    if c_pixels[x, y] == (0, 0, 0, 255):
+                        c_pixels[x, y] = (0, 0, 0, 0)
+                    else:
+                        c_pixels[x, y] = c_pixels[x, y][:3] + (alpha,)
+            combined_masks.alpha_composite(c_mask)
+
+        if show_soma:
+            draw = ImageDraw.Draw(combined_masks)
+            soma_center_rad = 2
+            for x_s, y_s in zip(self.xs_n, self.ys_n):
+                draw.ellipse([
+                    (x_s - soma_center_rad, y_s - soma_center_rad),
+                    (x_s + soma_center_rad, y_s + soma_center_rad)],
+                fill=(255, 0, 0))
+
+        return combined_masks
+
     def save(self, output_path: str):
+        self.log_info(f'Saving data to {output_path} ...')
+
         if not os.path.exists(output_path):
             os.mkdir(output_path)
         
+        assert self.bg_tyx_list is not None
+        assert self.neuron_fluorescence_tyx_list is not None
+        assert self.neuron_mean_fluorescence_nt_list is not None
+        assert self.clean_movie_tyx_list is not None
+        assert self.noisy_movie_tyx_list is not None
+
         # masks
         np.save(
             os.path.join(output_path, 'masks_nyx.npy'),
@@ -284,3 +347,41 @@ class Optosynth:
         np.save(
             os.path.join(output_path, 'soma_coords_n2.npy'),
             np.concatenate((self.xs_n[:, None], self.ys_n[:, None]), -1))
+        
+        # a snapshot of all neuron instances
+        self.get_combined_mask().save(
+            os.path.join(output_path, 'all_neurons.png'))
+
+    def generate_avi_from_segment(
+            self,
+            segment_index: int,
+            movie_type: str,
+            output_root: str,
+            n_frame_mean_subtraction: int):
+
+        self.log_info(f'Saving {movie_type} .avi movie from segment {segment_index} to {output_root} ...')
+        
+        assert movie_type in {'clean', 'noisy'}
+
+        # select movie
+        if movie_type == 'clean':
+            movie_tyx = self.clean_movie_tyx_list[segment_index]
+            std_mult = 10.
+        elif movie_type == 'noisy':
+            movie_tyx = self.noisy_movie_tyx_list[segment_index]
+            std_mult = 3.
+
+        # normalize and generate
+        movie_mean_yx = np.mean(movie_tyx[:n_frame_mean_subtraction], axis=0)
+        res_movie_tyx = movie_tyx - movie_mean_yx[None, ...]
+        res_movie_scale = std_mult * np.std(res_movie_tyx)    
+        norm = Normalize(vmin=0, vmax=res_movie_scale, clip=True)
+        normed_res_movie_tyx = (255 * norm(res_movie_tyx)[..., None])
+
+        # write .avi
+        writer = skvideo.io.FFmpegWriter(
+            os.path.join(output_root, f"{movie_type}_movie_segment_{segment_index}.avi"),
+            outputdict={'-vcodec': 'rawvideo', '-pix_fmt': 'yuv420p', '-r': '60'})
+        for i_frame in range(len(normed_res_movie_tyx)):
+            writer.writeFrame(normed_res_movie_tyx[i_frame])
+        writer.close()

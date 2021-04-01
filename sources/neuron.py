@@ -1,9 +1,11 @@
 import numpy as np
+from scipy import signal
 import torch
+from typing import Callable
 from specs import *
 from PIL import Image
 from boltons.cacheutils import cachedmethod
-from scipy.interpolate import InterpolatedUnivariateSpline
+from scipy.interpolate import interp1d
 from allen_data import ProcessedAllenNeuronMorphology, ProcessedAllenNeuronElectrophysiology
 from utils import generate_correlated_noise_2d
 from v2f import VoltageToFluorescenceConverter
@@ -91,6 +93,12 @@ class SyntheticNeuronFluorescenceGenerator:
         self.attenuation_mask = attenuation_mask
         self.xs = xs
         self.ys = ys
+
+        # nonzero values of various masks
+        self.nnz_delay_mask_j = self.delay_mask[self.mask]
+        self.nnz_attenuation_mask_j = self.attenuation_mask[self.mask]
+        self.nnz_density_j = self.density[self.mask]
+        self.n_nnz_mask = np.sum(self.mask)
         
         # voltage to fluorescence
         self.v2f = VoltageToFluorescenceConverter(v2f_specs)
@@ -99,34 +107,41 @@ class SyntheticNeuronFluorescenceGenerator:
         self._spline_cache = dict()
 
     @cachedmethod(cache='_spline_cache')
-    def get_spline(self, sweep_index) -> InterpolatedUnivariateSpline:
-        return InterpolatedUnivariateSpline(
-            x=self.ephys.time_list[sweep_index],
-            y=self.ephys.voltage_list[sweep_index],
-            k=1,  # linear
-            ext=3,  # use bounadry values for extrapolation
-        )
-    
+    def get_voltage_interp(self, sweep_index) -> Tuple[float, Callable]:
+        
+        # raw ephys sweep data
+        t = self.ephys.time_list[sweep_index]
+        v = self.ephys.voltage_list[sweep_index]
+
+        # lowpass filter
+        fs = 1. / np.mean(t[1:] - t[:-1])
+        b, a = signal.butter(1, self.neuron_specs.ephys_lowpass_freq, fs=fs)
+        v_filt = signal.filtfilt(b, a, v)
+        
+        return (
+            v_filt[0],
+            interp1d(
+                t,
+                v_filt,
+                kind='nearest',
+                fill_value=(v_filt[0], v_filt[-1]),
+                assume_sorted=True,
+                bounds_error=False))
+            
     def get_fluorescence(
             self,
             sweep_index: int,
-            t: float,
-            sampling_rate: float) -> np.ndarray:
+            t: float) -> np.ndarray:
         
-        # get ephys spline
-        spline = self.get_spline(sweep_index)
-        
-        # get resting membrane voltage
-        v0 = self.ephys.voltage_list[sweep_index][0]
-        
+        # get resting membrance potential and ephys interp
+        v0, voltage_interp = self.get_voltage_interp(sweep_index)
+                
         # integrate fluorescence
-        integ_times = np.linspace(t - 1. / sampling_rate, t, num=self.neuron_specs.n_integ_points)
         output_yx = np.zeros((self.height, self.width))
-        for integ_time in integ_times:
-            query_time_yx = integ_time - self.delay_mask
-            query_voltage_raw_yx = spline(query_time_yx.flatten()).reshape(self.height, self.width)
-            query_voltage_attenuated_yx = self.attenuation_mask * query_voltage_raw_yx + v0 * (1. - self.attenuation_mask)
-            query_fluorescence_yx = self.v2f(query_voltage_attenuated_yx) * self.density
-            output_yx += query_fluorescence_yx
-        output_yx = output_yx / len(integ_times)
+        integ_times_j = t - self.nnz_delay_mask_j
+        query_voltage_raw_j = voltage_interp(integ_times_j)
+        query_voltage_attenuated_j = self.nnz_attenuation_mask_j * query_voltage_raw_j + v0 * (1. - self.nnz_attenuation_mask_j)
+        query_fluorescence_j = self.v2f(query_voltage_attenuated_j) * self.nnz_density_j
+        output_yx[self.mask] = query_fluorescence_j
+        
         return output_yx
